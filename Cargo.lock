@@ -8369,11 +8369,12 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xray-deck"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
+ "embed-resource",
  "futures",
  "gpui-kit",
  "hex",

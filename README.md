@@ -2,7 +2,7 @@
 
 管理已有 WinSW Xray 服务的 Windows 桌面面板，使用 Rust 和 GPUI Kit 0.7.3 构建。
 
-当前版本 **0.1.25**，已达到首个 MVP 目标。支持 Windows 10/11 x64，以便携包交付。
+当前版本 **0.1.26**，已达到首个 MVP 目标。支持 Windows 10/11 x64，以便携包交付。
 
 ## 功能
 
@@ -17,7 +17,7 @@
 ## 开始使用
 
 1. 准备正在运行的 WinSW Xray 服务，并启用 `HandlerService` 的明文 gRPC API（默认 `127.0.0.1:8080`）。观测结果需要额外配置 Observatory 模块和服务。
-2. 解压 `XrayDeck-0.1.25-windows-x64.zip`，保留 EXE 与随包 DLL 在同一目录，运行 `xray-deck.exe`。
+2. 解压 `XrayDeck-0.1.26-windows-x64.zip`，保留 EXE 与随包 DLL 在同一目录，运行 `xray-deck.exe`。
 3. 在“设置”中保存并测试 API 地址，返回主页点击“刷新出站”。
 4. 如需查询本地核心版本或升级，填写 Windows 服务名、WinSW 同名 XML 和 `xray.exe` 完整路径，完成关联校验。
 

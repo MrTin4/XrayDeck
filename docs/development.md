@@ -4,6 +4,8 @@
 
 ```text
 .github/workflows/ci.yml  Windows 自动验证与便携包构建
+assets/                  应用图标原图、多尺寸 ICO 与 Windows 资源定义
+build.rs                 构建时将图标资源嵌入 EXE
 docs/                    使用、设计、开发及验证记录
 scripts/env.ps1          当前 PowerShell 会话的工具链环境
 scripts/test.ps1         格式、单元测试、Clippy 与可选本机集成测试

@@ -8,6 +8,7 @@ use std::sync::{
 use windows_sys::{
     Win32::{
         Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM},
+        System::LibraryLoader::GetModuleHandleW,
         UI::{Shell::*, WindowsAndMessaging::*},
     },
     core::w,
@@ -44,43 +45,27 @@ impl Tray {
     }
 
     fn attach(hwnd: HWND, exit_requested: Arc<AtomicBool>) -> Result<Self> {
-        // A small opaque blue X icon, embedded in the executable without external files.
-        let mut pixels = [0u8; 32 * 32 * 4];
-        for y in 0..32usize {
-            for x in 0..32usize {
-                let cross = (6..26).contains(&x)
-                    && (6..26).contains(&y)
-                    && (x.abs_diff(y) < 3 || (31 - x).abs_diff(y) < 3);
-                let color = if cross {
-                    [255, 255, 255, 255]
-                } else {
-                    [210, 110, 40, 255]
-                };
-                pixels[(y * 32 + x) * 4..(y * 32 + x + 1) * 4].copy_from_slice(&color);
-            }
-        }
-        // SAFETY: buffers have the required 32x32 mask and BGRA lengths; hwnd belongs
-        // to this thread. All native resources are released by Drop on this thread.
+        // LR_SHARED icons belong to the executable module and remain valid for the
+        // window's lifetime, even if tray registration fails or Tray is dropped.
         unsafe {
-            let icon = CreateIcon(
-                std::ptr::null_mut(),
-                32,
-                32,
-                1,
-                32,
-                [0u8; 128].as_ptr(),
-                pixels.as_ptr(),
-            );
-            if icon.is_null() {
-                bail!("无法创建托盘图标");
+            let module = GetModuleHandleW(std::ptr::null());
+            let load = |width, height| {
+                LoadImageW(module, 1usize as _, IMAGE_ICON, width, height, LR_SHARED)
+            };
+            let small = load(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
+            let large = load(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+            if small.is_null() || large.is_null() {
+                bail!("无法加载应用图标：{}", std::io::Error::last_os_error());
             }
+            SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, small as isize);
+            SendMessageW(hwnd, WM_SETICON, ICON_BIG as usize, large as isize);
             let mut data = NOTIFYICONDATAW {
                 cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
                 hWnd: hwnd,
                 uID: ICON_ID,
                 uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
                 uCallbackMessage: CALLBACK,
-                hIcon: icon,
+                hIcon: small,
                 ..Default::default()
             };
             for (dst, src) in data
@@ -133,7 +118,6 @@ impl Drop for Tray {
         unsafe {
             RemoveWindowSubclass(self.state.data.hWnd, Some(callback), SUBCLASS_ID);
             Shell_NotifyIconW(NIM_DELETE, &self.state.data);
-            DestroyIcon(self.state.data.hIcon);
         }
     }
 }
@@ -250,6 +234,12 @@ mod tests {
             );
             assert!(!hwnd.is_null());
             let tray = Tray::attach(hwnd, Arc::new(AtomicBool::new(false))).unwrap();
+            // The same embedded icon must also be assigned to the title bar and taskbar.
+            assert_eq!(
+                SendMessageW(hwnd, WM_GETICON, ICON_SMALL as usize, 0),
+                tray.state.data.hIcon as isize
+            );
+            assert_ne!(SendMessageW(hwnd, WM_GETICON, ICON_BIG as usize, 0), 0);
             SendMessageW(hwnd, CALLBACK, ICON_ID as usize, WM_LBUTTONUP as isize);
             assert_ne!(IsWindowVisible(hwnd), 0);
             tray.hide();

@@ -1011,7 +1011,7 @@ impl Render for NodeList {
                             let cell = if index == 0 && self.selected.contains(value) {
                                 cell.truncate()
                                     .text_color(rgb(0x67e8f9))
-                                    .child(format!("● 已选中 · {value}"))
+                                    .child(format!("● {value}"))
                             } else {
                                 cell.truncate().child(value.clone())
                             };

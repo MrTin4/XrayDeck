@@ -643,12 +643,11 @@ pub async fn inspect(address: &str) -> Result<ApiSnapshot> {
                 Some(observation_error(&status, discovered_services.as_deref()))
         }
     }
-    match config {
-        Ok(balancers) if !balancers.is_empty() => retain_balancer_nodes(&mut snapshot, &balancers),
-        Ok(_) => notes.push("服务配置中没有负载均衡器，显示全部出站".into()),
-        Err(error) => notes.push(format!(
-            "负载均衡配置自动发现失败：{error}；当前显示全部出站"
-        )),
+    // Balancer discovery supplies selection markers only; ListOutbounds defines the list.
+    if let Err(error) = config {
+        notes.push(format!(
+            "负载均衡配置自动发现失败：{error}；无法读取选中状态，仍显示全部出站"
+        ));
     }
     notes.sort();
     snapshot.balancers_note = (!notes.is_empty()).then(|| notes.join("；"));
@@ -662,62 +661,33 @@ pub fn inspect_blocking(address: &str) -> Result<ApiSnapshot> {
     tokio::runtime::Runtime::new()?.block_on(inspect(address))
 }
 
-fn retain_balancer_nodes(
-    snapshot: &mut ApiSnapshot,
-    balancers: &[crate::routing_config::Balancer],
-) {
-    snapshot.nodes.retain(|node| {
-        snapshot.selected_nodes.contains(&node.tag)
-            || balancers.iter().any(|balancer| {
-                balancer
-                    .selector
-                    .iter()
-                    .any(|prefix| node.tag.starts_with(prefix))
-                    || (!balancer.fallback_tag.is_empty() && node.tag == balancer.fallback_tag)
-            })
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn all_balancer_members_are_merged_with_fallbacks_and_live_overrides() {
-        let mut snapshot = ApiSnapshot {
-            nodes: ["a-1", "a-2", "b-1", "direct", "override", "unused"]
+    fn selection_sort_preserves_all_outbounds_including_system_and_unselected_nodes() {
+        let snapshot = ApiSnapshot {
+            nodes: ["a-1", "a-2", "b-1", "direct", "override", "unused", "block"]
                 .into_iter()
                 .map(|tag| Node {
                     tag: tag.into(),
                     protocol: String::new(),
                     address: None,
                     port: None,
-                    proxy: true,
+                    proxy: !matches!(tag, "direct" | "block"),
                 })
                 .collect(),
             selected_nodes: ["a-2".into(), "override".into()].into(),
             ..Default::default()
         };
-        let balancers = vec![
-            crate::routing_config::Balancer {
-                tag: "first".into(),
-                selector: vec!["a-".into()],
-                fallback_tag: "direct".into(),
-            },
-            crate::routing_config::Balancer {
-                tag: "second".into(),
-                selector: vec!["a-".into(), "b-".into()],
-                fallback_tag: String::new(),
-            },
-        ];
-        retain_balancer_nodes(&mut snapshot, &balancers);
         assert_eq!(
             snapshot
                 .nodes
                 .iter()
                 .map(|node| node.tag.as_str())
                 .collect::<Vec<_>>(),
-            ["a-1", "a-2", "b-1", "direct", "override"]
+            ["a-1", "a-2", "b-1", "direct", "override", "unused", "block"]
         );
         let ordered = snapshot.sorted_nodes(NodeSort::Api);
         assert_eq!(
@@ -725,7 +695,7 @@ mod tests {
                 .iter()
                 .map(|(node, _)| node.tag.as_str())
                 .collect::<Vec<_>>(),
-            ["a-2", "override", "a-1", "b-1", "direct"]
+            ["a-2", "override", "a-1", "b-1", "direct", "unused", "block"]
         );
     }
 

@@ -32,11 +32,33 @@ impl RefreshSchedule {
         self.restart(now);
         !blocked
     }
+
+    /// Keep a due check pending while busy, without queuing missed intervals.
+    pub fn poll_when_idle(&mut self, now: Instant, blocked: bool) -> bool {
+        !blocked && self.poll(now, false)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hourly_checks_defer_while_busy_and_resume_once_without_catching_up() {
+        let now = Instant::now();
+        let mut schedule = RefreshSchedule::default();
+        schedule.configure(true, 3600, now);
+        assert!(!schedule.poll_when_idle(now + Duration::from_secs(3599), false));
+        assert!(!schedule.poll_when_idle(now + Duration::from_secs(3600), true));
+        assert!(!schedule.poll_when_idle(now + Duration::from_secs(10800), true));
+        assert!(schedule.poll_when_idle(now + Duration::from_secs(10801), false));
+        assert!(!schedule.poll_when_idle(now + Duration::from_secs(10801), false));
+        assert!(!schedule.poll_when_idle(now + Duration::from_secs(14400), false));
+        assert!(schedule.poll_when_idle(now + Duration::from_secs(14401), false));
+        schedule.configure(true, 120 * 60, now + Duration::from_secs(14402));
+        assert!(!schedule.poll_when_idle(now + Duration::from_secs(18002), false));
+        assert!(schedule.poll_when_idle(now + Duration::from_secs(21602), false));
+    }
 
     #[test]
     fn countdown_uses_the_deadline_and_rounds_up_without_underflow() {

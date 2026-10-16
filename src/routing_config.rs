@@ -11,10 +11,6 @@ use std::{
 #[derive(Clone, Deserialize)]
 pub(crate) struct Balancer {
     pub tag: String,
-    #[serde(default)]
-    pub selector: Vec<String>,
-    #[serde(default, rename = "fallbackTag")]
-    pub fallback_tag: String,
 }
 
 #[derive(Default, Deserialize)]
@@ -337,8 +333,6 @@ mod tests {
             balancers.iter().map(|b| b.tag.as_str()).collect::<Vec<_>>(),
             ["b", "c"]
         );
-        assert_eq!(balancers[0].fallback_tag, "direct");
-        assert_eq!(balancers[0].selector, ["backup-"]);
     }
 
     #[test]

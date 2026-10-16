@@ -22,7 +22,7 @@ use xray_deck::{
     api::{self, ApiSnapshot, NodeSort},
     refresh::RefreshSchedule,
     service::{self, ServiceInfo},
-    settings::{Settings, data_dir, parse_refresh_interval},
+    settings::{Settings, data_dir, parse_refresh_interval, parse_update_check_interval},
     update::{self, Release},
     version::parse_version,
 };
@@ -63,8 +63,10 @@ struct Deck {
     config: Entity<InputState>,
     core: Entity<InputState>,
     refresh_interval: Entity<InputState>,
+    update_check_interval: Entity<InputState>,
     auto_refresh_draft: bool,
     refresh_schedule: RefreshSchedule,
+    update_check_schedule: RefreshSchedule,
     settings: Settings,
     settings_path: PathBuf,
     snapshot: Option<ApiSnapshot>,
@@ -164,7 +166,14 @@ impl Deck {
                 cx,
             ),
             auto_refresh_draft: settings.auto_refresh,
+            update_check_interval: input(
+                settings.update_check_interval_mins.to_string(),
+                "更新检测间隔（分钟）",
+                window,
+                cx,
+            ),
             refresh_schedule: RefreshSchedule::default(),
+            update_check_schedule: RefreshSchedule::default(),
             settings,
             settings_path,
             snapshot: None,
@@ -208,9 +217,19 @@ impl Deck {
                             || this.starting
                             || this.local_loading
                             || this.confirm_upgrade
-                            || this.page != Page::Home
                             || this.close_requested.load(Ordering::SeqCst);
-                        if this.refresh_schedule.poll(Instant::now(), blocked) {
+                        // Leave a due update pending while busy, then run it before
+                        // node refresh so frequent refreshes cannot starve checks.
+                        if this
+                            .update_check_schedule
+                            .poll_when_idle(Instant::now(), blocked)
+                        {
+                            this.check(cx);
+                        }
+                        if this.refresh_schedule.poll(
+                            Instant::now(),
+                            blocked || this.busy || this.page != Page::Home,
+                        ) {
                             this.refresh(cx);
                         }
                         if this.settings.auto_refresh && this.page == Page::Home {
@@ -304,6 +323,7 @@ impl Deck {
             winsw_config: PathBuf::from(self.config.read(cx).value().to_string().trim()),
             xray_path: PathBuf::from(self.core.read(cx).value().to_string().trim()),
             include_prerelease: self.settings.include_prerelease,
+            update_check_interval_mins: self.settings.update_check_interval_mins,
             auto_refresh: self.auto_refresh_draft,
             refresh_interval_secs: self.settings.refresh_interval_secs,
         }
@@ -314,6 +334,14 @@ impl Deck {
         settings.refresh_interval_secs =
             match parse_refresh_interval(&self.refresh_interval.read(cx).value()) {
                 Ok(seconds) => seconds,
+                Err(error) => {
+                    self.settings_status = format!("保存失败：{error:#}");
+                    return false;
+                }
+            };
+        settings.update_check_interval_mins =
+            match parse_update_check_interval(&self.update_check_interval.read(cx).value()) {
+                Ok(minutes) => minutes,
                 Err(error) => {
                     self.settings_status = format!("保存失败：{error:#}");
                     return false;
@@ -345,6 +373,13 @@ impl Deck {
                     self.refresh_schedule.configure(
                         settings.auto_refresh,
                         settings.refresh_interval_secs,
+                        Instant::now(),
+                    );
+                }
+                if self.settings.update_check_interval_mins != settings.update_check_interval_mins {
+                    self.update_check_schedule.configure(
+                        true,
+                        settings.update_check_interval_mins * 60,
                         Instant::now(),
                     );
                 }
@@ -498,6 +533,11 @@ impl Deck {
         }
         // Consume before dispatch so later jobs/local validation never repeat it.
         self.startup_update_pending = false;
+        self.update_check_schedule.configure(
+            true,
+            self.settings.update_check_interval_mins * 60,
+            Instant::now(),
+        );
         self.confirm_upgrade = false;
         self.release = None;
         let pre = self.settings.include_prerelease;
@@ -1166,6 +1206,13 @@ impl Render for Deck {
                         [s.runtime_version_source.as_deref(), s.runtime_version_note.as_deref()].into_iter().flatten().collect::<Vec<_>>().join(" · ")))
                         .unwrap_or_else(||"校验服务、包装器、核心路径及 API 监听进程后才允许升级。".into()))))
                 .child(card().child(div().text_lg().child("核心更新"))
+                    .child(div().flex().gap_3().items_center()
+                        .child(label("定时检测间隔"))
+                        .child(div().w(px(180.)).child(deck_input(&self.update_check_interval, busy)))
+                        .child(label("分钟（1–10080）"))
+                        .child(deck_button("save-update-check", cx).label("保存检测设置").disabled(busy).on_click(cx.listener(|this,_,_,cx| { this.save(cx); cx.notify(); }))))
+                    .child(label("默认每 60 分钟检测一次，保存后生效；设置页及托盘后台继续检测，忙碌时延后。手动检测后重新计时，仅检查版本。"))
+                    .when(!self.settings_status.is_empty(), |view| view.child(label(self.settings_status.clone())))
                     .when(!self.update_status.is_empty(), |view| view.child(label(self.update_status.clone())))
                     .when(self.release.is_some() || self.update_status.is_empty(), |view| view.child(label(update_text)))
                     .child(div().flex().gap_3().items_center()

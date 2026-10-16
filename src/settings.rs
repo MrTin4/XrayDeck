@@ -13,6 +13,7 @@ pub struct Settings {
     pub winsw_config: PathBuf,
     pub xray_path: PathBuf,
     pub include_prerelease: bool,
+    pub update_check_interval_mins: u64,
     pub auto_refresh: bool,
     pub refresh_interval_secs: u64,
 }
@@ -25,6 +26,7 @@ impl Default for Settings {
             winsw_config: PathBuf::new(),
             xray_path: PathBuf::new(),
             include_prerelease: false,
+            update_check_interval_mins: 60,
             auto_refresh: false,
             refresh_interval_secs: 30,
         }
@@ -70,6 +72,7 @@ impl Settings {
                 let settings: Self =
                     serde_json::from_slice(&bytes).context("设置文件损坏，请修复后重新打开")?;
                 validate_refresh_interval(settings.refresh_interval_secs)?;
+                validate_update_check_interval(settings.update_check_interval_mins)?;
                 Ok(settings)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
@@ -80,6 +83,7 @@ impl Settings {
     pub fn save(&self, path: &Path) -> Result<()> {
         api_endpoint(&self.api_address)?;
         validate_refresh_interval(self.refresh_interval_secs)?;
+        validate_update_check_interval(self.update_check_interval_mins)?;
         let parent = path.parent().context("无效设置路径")?;
         fs::create_dir_all(parent)?;
         // Write fully before replacing the last good settings file.
@@ -107,6 +111,23 @@ impl Settings {
     }
 }
 
+pub fn parse_update_check_interval(value: &str) -> Result<u64> {
+    let minutes = value
+        .trim()
+        .parse()
+        .context("更新检测间隔请输入整数分钟（1–10080）")?;
+    validate_update_check_interval(minutes)?;
+    Ok(minutes)
+}
+
+fn validate_update_check_interval(minutes: u64) -> Result<()> {
+    anyhow::ensure!(
+        (1..=10080).contains(&minutes),
+        "更新检测间隔须为 1–10080 分钟"
+    );
+    Ok(())
+}
+
 pub fn parse_refresh_interval(value: &str) -> Result<u64> {
     let seconds = value
         .trim()
@@ -132,7 +153,30 @@ mod tests {
                 .unwrap();
         assert!(!settings.auto_refresh);
         assert_eq!(settings.refresh_interval_secs, 30);
+        assert_eq!(settings.update_check_interval_mins, 60);
         assert_eq!(settings.service_name, "winsw-xray");
+    }
+
+    #[test]
+    fn update_check_interval_validation_preserves_saved_settings() {
+        for value in ["", "0", "10081", "-1", "1.5", "abc", "18446744073709551616"] {
+            assert!(parse_update_check_interval(value).is_err(), "{value}");
+        }
+        assert_eq!(parse_update_check_interval(" 1 ").unwrap(), 1);
+        assert_eq!(parse_update_check_interval("10080").unwrap(), 10080);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut settings = Settings::default();
+        settings.save(&path).unwrap();
+        let original = fs::read(&path).unwrap();
+        for minutes in [0, 10081, u64::MAX] {
+            settings.update_check_interval_mins = minutes;
+            assert!(settings.save(&path).is_err());
+            assert_eq!(fs::read(&path).unwrap(), original);
+            fs::write(&path, serde_json::to_vec(&settings).unwrap()).unwrap();
+            assert!(Settings::load(&path).is_err());
+            fs::write(&path, &original).unwrap();
+        }
     }
 
     #[test]
@@ -190,6 +234,7 @@ mod tests {
             service_name: "winsw-xray".into(),
             auto_refresh: true,
             refresh_interval_secs: 17,
+            update_check_interval_mins: 120,
             ..Settings::default()
         };
         settings.save(&path).unwrap();

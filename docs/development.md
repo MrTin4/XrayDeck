@@ -16,11 +16,11 @@ src/ui.rs                GPUI 界面、后台任务与交互状态
 src/tray.rs              Windows 托盘图标、恢复窗口、退出及资源管理器重启恢复
 src/single_instance.rs   会话内桌面单例锁、跨进程唤起事件与窗口恢复
 src/api.rs               gRPC 能力探测、节点与观测、流量、负载均衡目标解码及排序
-src/routing_config.rs    关联 API 进程、读取 WinSW 启动配置及全部负载均衡器范围
+src/routing_config.rs    关联 API 进程、读取 WinSW 启动配置中的负载均衡器 tag（用于选中状态）
 src/service.rs           WinSW、进程、核心路径与版本关联校验
 src/update.rs            官方发布查询、下载校验、升级与回滚事务
 src/settings.rs          设置校验与原子保存
-src/refresh.rs           自动刷新调度及倒计时
+src/refresh.rs           自动刷新、定时更新检测调度及倒计时
 src/version.rs           版本解析和比较
 src/logging.rs           固定应用事件及日志轮换
 tests/api_live.rs        显式启用的本机只读集成测试
@@ -45,7 +45,7 @@ cargo run --locked
 
 ## 验证
 
-默认检查不会访问真实 Xray 服务或执行升级。45 项核心单元测试包括本机临时 gRPC Reflection 服务、设置临时文件以及模拟升级事务，另有 3 项桌面列表测试及 3 项单例测试，覆盖跨进程重复启动、启动期间的唤起请求、锁释放和隐藏/最小化窗口恢复。`-Tray` 可额外运行 1 项原生托盘测试，创建独立临时窗口验证隐藏、恢复及图标重建；需要交互式 Windows 桌面和资源管理器，不访问用户设置。测试环境需允许回环连接和临时文件替换。升级及回滚模拟测试不代表真实服务端到端验收。
+默认检查不会访问真实 Xray 服务或执行升级。47 项核心单元测试包括本机临时 gRPC Reflection 服务、设置临时文件以及模拟升级事务，另有 3 项桌面列表测试及 3 项单例测试，覆盖跨进程重复启动、启动期间的唤起请求、锁释放和隐藏/最小化窗口恢复。`-Tray` 可额外运行 1 项原生托盘测试，创建独立临时窗口验证隐藏、恢复及图标重建；需要交互式 Windows 桌面和资源管理器，不访问用户设置。测试环境需允许回环连接和临时文件替换。升级及回滚模拟测试不代表真实服务端到端验收。
 
 ```powershell
 cargo fmt --check

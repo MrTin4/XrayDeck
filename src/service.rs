@@ -128,7 +128,7 @@ fn same_path(a: &Path, b: &Path) -> Result<bool> {
 }
 
 #[cfg(windows)]
-fn process_image(pid: u32) -> Result<PathBuf> {
+pub(crate) fn process_image(pid: u32) -> Result<PathBuf> {
     use windows_sys::Win32::{
         Foundation::CloseHandle,
         System::Threading::{
@@ -152,11 +152,11 @@ fn process_image(pid: u32) -> Result<PathBuf> {
     }
 }
 #[cfg(not(windows))]
-fn process_image(_: u32) -> Result<PathBuf> {
+pub(crate) fn process_image(_: u32) -> Result<PathBuf> {
     bail!("仅支持 Windows")
 }
 
-fn expand_path(value: &str, base: &Path) -> Result<PathBuf> {
+pub(crate) fn expand_path(value: &str, base: &Path) -> Result<PathBuf> {
     let mut expanded = value.replace("%BASE%", &base.to_string_lossy());
     while let Some(start) = expanded.find('%') {
         let tail = &expanded[start + 1..];

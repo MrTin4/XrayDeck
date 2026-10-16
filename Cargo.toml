@@ -1,6 +1,6 @@
 [package]
 name = "xray-deck"
-version = "0.1.21"
+version = "0.1.25"
 edition = "2024"
 license = "MIT"
 description = "Windows desktop panel for an existing WinSW-managed Xray service"
@@ -32,7 +32,8 @@ zip = { version = "4", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 gpui-kit = { version = "=0.7.3", optional = true }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_Registry"] }
+raw-window-handle = "0.6"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_Registry"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,6 +1,10 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 #[cfg(all(windows, feature = "desktop"))]
+mod single_instance;
+#[cfg(all(windows, feature = "desktop"))]
+mod tray;
+#[cfg(all(windows, feature = "desktop"))]
 mod ui;
 
 fn main() {
@@ -53,7 +57,9 @@ fn run() -> anyhow::Result<()> {
         Some(other) => anyhow::bail!("未知参数：{other}"),
         None => {
             #[cfg(all(windows, feature = "desktop"))]
-            ui::run()?;
+            if let Some(instance) = single_instance::Instance::start()? {
+                ui::run(instance)?;
+            }
             #[cfg(not(all(windows, feature = "desktop")))]
             anyhow::bail!("请启用 desktop 功能运行 Windows 界面，或使用 --inspect ADDRESS");
         }

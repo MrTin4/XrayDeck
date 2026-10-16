@@ -17,9 +17,11 @@ jobs:
         run: cargo test --locked --no-default-features
       - name: Desktop checks
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Desktop unit tests
+        run: cargo test --locked --all-features --bin xray-deck
       - name: Build portable release
         shell: pwsh
-        run: ./scripts/package.ps1
+        run: ./scripts/build.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: XrayDeck-windows-x64

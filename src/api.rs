@@ -1,5 +1,6 @@
 use crate::settings::api_endpoint;
 use anyhow::{Context, Result};
+use futures::StreamExt;
 use prost::Message;
 use serde::Serialize;
 use std::{
@@ -29,7 +30,7 @@ pub struct Observation {
     pub burst: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ApiSnapshot {
     pub services: Vec<String>,
     pub discovery_note: Option<String>,
@@ -38,6 +39,16 @@ pub struct ApiSnapshot {
     pub observations: Vec<Observation>,
     pub observations_note: Option<String>,
     pub checked_at: String,
+    pub traffic: std::collections::HashMap<String, NodeTraffic>,
+    pub traffic_note: Option<String>,
+    pub selected_nodes: std::collections::BTreeSet<String>,
+    pub balancers_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct NodeTraffic {
+    pub uplink: Option<u64>,
+    pub downlink: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +118,8 @@ impl ApiSnapshot {
                 (None, None) => std::cmp::Ordering::Equal,
             });
         }
+        // Stable partition preserves the chosen secondary order within both groups.
+        rows.sort_by_key(|(node, _)| !self.selected_nodes.contains(&node.tag));
         rows
     }
 }
@@ -190,6 +203,91 @@ struct SystemStats {
     #[prost(uint32, tag = "10")]
     uptime: u32,
 }
+
+#[derive(Clone, PartialEq, Message)]
+struct QueryStatsRequest {
+    #[prost(string, tag = "1")]
+    pattern: String,
+    #[prost(bool, tag = "2")]
+    reset: bool,
+}
+#[derive(Clone, PartialEq, Message)]
+struct Stat {
+    #[prost(string, tag = "1")]
+    name: String,
+    #[prost(int64, tag = "2")]
+    value: i64,
+}
+#[derive(Clone, PartialEq, Message)]
+struct QueryStatsResponse {
+    #[prost(message, repeated, tag = "1")]
+    stat: Vec<Stat>,
+}
+#[derive(Clone, PartialEq, Message)]
+struct BalancerRequest {
+    #[prost(string, tag = "1")]
+    tag: String,
+}
+#[derive(Clone, PartialEq, Message)]
+struct BalancerResponse {
+    #[prost(message, optional, tag = "1")]
+    balancer: Option<BalancerInfo>,
+}
+#[derive(Clone, PartialEq, Message)]
+struct BalancerInfo {
+    #[prost(message, optional, tag = "5")]
+    override_target: Option<OverrideTarget>,
+    #[prost(message, optional, tag = "6")]
+    principle_target: Option<PrincipleTarget>,
+}
+#[derive(Clone, PartialEq, Message)]
+struct OverrideTarget {
+    #[prost(string, tag = "2")]
+    target: String,
+}
+#[derive(Clone, PartialEq, Message)]
+struct PrincipleTarget {
+    #[prost(string, repeated, tag = "1")]
+    tag: Vec<String>,
+}
+
+fn decode_traffic(response: QueryStatsResponse) -> std::collections::HashMap<String, NodeTraffic> {
+    let mut traffic = std::collections::HashMap::<String, NodeTraffic>::new();
+    for stat in response.stat {
+        let Some(name) = stat.name.strip_prefix("outbound>>>") else {
+            continue;
+        };
+        let Some((tag, direction)) = name.rsplit_once(">>>traffic>>>") else {
+            continue;
+        };
+        let Ok(value) = u64::try_from(stat.value) else {
+            continue;
+        };
+        if tag.is_empty() || !matches!(direction, "uplink" | "downlink") {
+            continue;
+        }
+        let entry = traffic.entry(tag.to_owned()).or_default();
+        if direction == "uplink" {
+            entry.uplink = Some(value);
+        } else {
+            entry.downlink = Some(value);
+        }
+    }
+    traffic
+}
+
+fn balancer_targets(info: BalancerInfo) -> Option<Vec<String>> {
+    if let Some(target) = info.override_target.filter(|o| !o.target.is_empty()) {
+        return Some(vec![target.target]);
+    }
+    info.principle_target.map(|targets| {
+        targets
+            .tag
+            .into_iter()
+            .filter(|tag| !tag.is_empty())
+            .collect()
+    })
+}
 #[derive(Clone, PartialEq, Message)]
 struct ReflectionRequest {
     #[prost(oneof = "reflection_request::MessageRequest", tags = "7")]
@@ -241,16 +339,24 @@ async fn unary<Resp: Message + Default + 'static>(
     channel: Channel,
     path: &'static str,
 ) -> Result<Resp, tonic::Status> {
+    unary_with(channel, path, Empty {}).await
+}
+
+async fn unary_with<Req: Message + Default + 'static, Resp: Message + Default + 'static>(
+    channel: Channel,
+    path: &'static str,
+    body: Req,
+) -> Result<Resp, tonic::Status> {
     let mut grpc = tonic::client::Grpc::new(channel).max_decoding_message_size(16 * 1024 * 1024);
     grpc.ready()
         .await
         .map_err(|_| tonic::Status::unavailable("gRPC 连接不可用"))?;
-    let mut request = Request::new(Empty {});
+    let mut request = Request::new(body);
     request.set_timeout(Duration::from_secs(8));
     grpc.unary(
         request,
         tonic::codegen::http::uri::PathAndQuery::from_static(path),
-        tonic_prost::ProstCodec::<Empty, Resp>::default(),
+        tonic_prost::ProstCodec::<Req, Resp>::default(),
     )
     .await
     .map(|r| r.into_inner())
@@ -406,7 +512,17 @@ pub async fn inspect(address: &str) -> Result<ApiSnapshot> {
         .context("无法连接 Xray gRPC API")?;
     let discovery = reflect(channel.clone()).await;
     let discovered_services = discovery.as_ref().ok().cloned();
-    let (nodes, observation, stats, routing) = tokio::join!(
+    let config = crate::routing_config::discover(address);
+    let balancer_tags: Vec<_> = config
+        .as_ref()
+        .map(|balancers| {
+            balancers
+                .iter()
+                .map(|balancer| balancer.tag.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let (nodes, observation, stats, routing, traffic, balancers) = tokio::join!(
         unary::<Outbounds>(
             channel.clone(),
             "/xray.app.proxyman.command.HandlerService/ListOutbounds"
@@ -419,7 +535,33 @@ pub async fn inspect(address: &str) -> Result<ApiSnapshot> {
             channel.clone(),
             "/xray.app.stats.command.StatsService/GetSysStats"
         ),
-        unary::<Empty>(channel, "/xray.app.router.command.RoutingService/ListRule")
+        unary::<Empty>(
+            channel.clone(),
+            "/xray.app.router.command.RoutingService/ListRule"
+        ),
+        unary_with::<_, QueryStatsResponse>(
+            channel.clone(),
+            "/xray.app.stats.command.StatsService/QueryStats",
+            QueryStatsRequest {
+                pattern: "outbound>>>".into(),
+                reset: false
+            }
+        ),
+        futures::stream::iter(balancer_tags.iter().cloned())
+            .map(|tag| {
+                let channel = channel.clone();
+                async move {
+                    let result = unary_with::<_, BalancerResponse>(
+                        channel,
+                        "/xray.app.router.command.RoutingService/GetBalancerInfo",
+                        BalancerRequest { tag: tag.clone() },
+                    )
+                    .await;
+                    (tag, result)
+                }
+            })
+            .buffer_unordered(8)
+            .collect::<Vec<_>>()
     );
     let mut snapshot = ApiSnapshot {
         services: discovery.as_ref().cloned().unwrap_or_default(),
@@ -429,7 +571,35 @@ pub async fn inspect(address: &str) -> Result<ApiSnapshot> {
         observations: vec![],
         observations_note: None,
         checked_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        ..Default::default()
     };
+    match traffic {
+        Ok(response) => {
+            snapshot.traffic = decode_traffic(response);
+            snapshot
+                .services
+                .push("StatsService/QueryStats（只读调用已验证）".into());
+            if snapshot.traffic.is_empty() {
+                snapshot.traffic_note = Some("未提供的流量显示 —；请启用 stats 及 policy.system.statsOutboundUplink / statsOutboundDownlink。累计值自核心启动或上次重置起计算。".into());
+            }
+        }
+        Err(status) => {
+            snapshot.traffic_note = Some(format!("流量读取：{}", capability_error(&status)))
+        }
+    }
+    let mut notes = Vec::new();
+    for (tag, result) in balancers {
+        match result {
+            Ok(response) => match response.balancer.and_then(balancer_targets) {
+                Some(targets) if !targets.is_empty() => snapshot.selected_nodes.extend(targets),
+                _ => notes.push(format!("{tag}：核心未返回选中节点（策略可能不支持此查询）")),
+            },
+            Err(status) => notes.push(format!(
+                "{tag}：{}；请检查 tag 和 RoutingService",
+                capability_error(&status)
+            )),
+        }
+    }
     for (service, result) in [
         ("StatsService/GetSysStats", stats.map(|_| ())),
         ("RoutingService/ListRule", routing.map(|_| ())),
@@ -473,6 +643,15 @@ pub async fn inspect(address: &str) -> Result<ApiSnapshot> {
                 Some(observation_error(&status, discovered_services.as_deref()))
         }
     }
+    match config {
+        Ok(balancers) if !balancers.is_empty() => retain_balancer_nodes(&mut snapshot, &balancers),
+        Ok(_) => notes.push("服务配置中没有负载均衡器，显示全部出站".into()),
+        Err(error) => notes.push(format!(
+            "负载均衡配置自动发现失败：{error}；当前显示全部出站"
+        )),
+    }
+    notes.sort();
+    snapshot.balancers_note = (!notes.is_empty()).then(|| notes.join("；"));
     snapshot.nodes.sort_by(|a, b| a.tag.cmp(&b.tag));
     snapshot.services.sort();
     snapshot.services.dedup();
@@ -483,9 +662,183 @@ pub fn inspect_blocking(address: &str) -> Result<ApiSnapshot> {
     tokio::runtime::Runtime::new()?.block_on(inspect(address))
 }
 
+fn retain_balancer_nodes(
+    snapshot: &mut ApiSnapshot,
+    balancers: &[crate::routing_config::Balancer],
+) {
+    snapshot.nodes.retain(|node| {
+        snapshot.selected_nodes.contains(&node.tag)
+            || balancers.iter().any(|balancer| {
+                balancer
+                    .selector
+                    .iter()
+                    .any(|prefix| node.tag.starts_with(prefix))
+                    || (!balancer.fallback_tag.is_empty() && node.tag == balancer.fallback_tag)
+            })
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_balancer_members_are_merged_with_fallbacks_and_live_overrides() {
+        let mut snapshot = ApiSnapshot {
+            nodes: ["a-1", "a-2", "b-1", "direct", "override", "unused"]
+                .into_iter()
+                .map(|tag| Node {
+                    tag: tag.into(),
+                    protocol: String::new(),
+                    address: None,
+                    port: None,
+                    proxy: true,
+                })
+                .collect(),
+            selected_nodes: ["a-2".into(), "override".into()].into(),
+            ..Default::default()
+        };
+        let balancers = vec![
+            crate::routing_config::Balancer {
+                tag: "first".into(),
+                selector: vec!["a-".into()],
+                fallback_tag: "direct".into(),
+            },
+            crate::routing_config::Balancer {
+                tag: "second".into(),
+                selector: vec!["a-".into(), "b-".into()],
+                fallback_tag: String::new(),
+            },
+        ];
+        retain_balancer_nodes(&mut snapshot, &balancers);
+        assert_eq!(
+            snapshot
+                .nodes
+                .iter()
+                .map(|node| node.tag.as_str())
+                .collect::<Vec<_>>(),
+            ["a-1", "a-2", "b-1", "direct", "override"]
+        );
+        let ordered = snapshot.sorted_nodes(NodeSort::Api);
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|(node, _)| node.tag.as_str())
+                .collect::<Vec<_>>(),
+            ["a-2", "override", "a-1", "b-1", "direct"]
+        );
+    }
+
+    #[test]
+    fn traffic_preserves_zero_missing_direction_and_exact_tags() {
+        let response = QueryStatsResponse {
+            stat: [
+                ("outbound>>>a>>>traffic>>>uplink", 0),
+                ("outbound>>>a>>>traffic>>>downlink", 2048),
+                ("outbound>>>a>>>b>>>traffic>>>uplink", 42),
+                ("outbound>>>negative>>>traffic>>>uplink", -1),
+                ("inbound>>>a>>>traffic>>>uplink", 999),
+                ("outbound>>>a>>>traffic>>>unknown", 999),
+            ]
+            .into_iter()
+            .map(|(name, value)| Stat {
+                name: name.into(),
+                value,
+            })
+            .collect(),
+        };
+        let traffic = decode_traffic(
+            QueryStatsResponse::decode(response.encode_to_vec().as_slice()).unwrap(),
+        );
+        assert_eq!(traffic.len(), 2);
+        assert_eq!(traffic["a"].uplink, Some(0));
+        assert_eq!(traffic["a"].downlink, Some(2048));
+        assert_eq!(traffic["a>>>b"].uplink, Some(42));
+        assert_eq!(traffic["a>>>b"].downlink, None);
+        let request = QueryStatsRequest {
+            pattern: "outbound>>>".into(),
+            reset: false,
+        };
+        assert!(
+            !QueryStatsRequest::decode(request.encode_to_vec().as_slice())
+                .unwrap()
+                .reset
+        );
+    }
+
+    #[test]
+    fn balancer_wire_fields_and_override_precedence() {
+        // balancer=1, override=5, override.target=2, principle_target=6, tag=1.
+        let response =
+            BalancerResponse::decode(&b"\x0a\x0a\x2a\x03\x12\x01a\x32\x03\x0a\x01b"[..]).unwrap();
+        assert_eq!(
+            balancer_targets(response.balancer.unwrap()),
+            Some(vec!["a".into()])
+        );
+        let candidates = BalancerInfo {
+            override_target: Some(OverrideTarget {
+                target: String::new(),
+            }),
+            principle_target: Some(PrincipleTarget {
+                tag: vec!["b".into(), "c".into()],
+            }),
+        };
+        assert_eq!(
+            balancer_targets(candidates),
+            Some(vec!["b".into(), "c".into()])
+        );
+        assert_eq!(balancer_targets(BalancerInfo::default()), None);
+    }
+
+    #[test]
+    fn selected_nodes_precede_all_others_for_every_sort() {
+        let mut snapshot = ApiSnapshot {
+            nodes: ["fast", "chosen-slow", "chosen-missing", "slow"]
+                .into_iter()
+                .map(|tag| Node {
+                    tag: tag.into(),
+                    protocol: String::new(),
+                    address: None,
+                    port: None,
+                    proxy: true,
+                })
+                .collect(),
+            observations: [
+                ("fast", 1, 100),
+                ("chosen-slow", 500, 200),
+                ("slow", 200, 300),
+            ]
+            .into_iter()
+            .map(|(tag, delay, last_try)| Observation {
+                tag: tag.into(),
+                alive: true,
+                delay_ms: Some(delay),
+                last_try,
+                burst: false,
+            })
+            .collect(),
+            selected_nodes: ["chosen-slow".into(), "chosen-missing".into()].into(),
+            ..Default::default()
+        };
+        for sort in [
+            NodeSort::Api,
+            NodeSort::Delay,
+            NodeSort::DelayDescending,
+            NodeSort::Newest,
+            NodeSort::Oldest,
+        ] {
+            let rows = snapshot.sorted_nodes(sort);
+            assert_eq!(rows[0].0.tag, "chosen-slow");
+            assert_eq!(rows[1].0.tag, "chosen-missing");
+            assert!(
+                rows[2..]
+                    .iter()
+                    .all(|(node, _)| !snapshot.selected_nodes.contains(&node.tag))
+            );
+        }
+        snapshot.selected_nodes = ["slow".into()].into();
+        assert_eq!(snapshot.sorted_nodes(NodeSort::Delay)[0].0.tag, "slow");
+    }
 
     #[test]
     fn decodes_core_probe_time_and_distinguishes_burst_without_a_timestamp() {
@@ -558,6 +911,7 @@ mod tests {
                 burst: false,
             })
             .collect(),
+            ..Default::default()
         };
         let ordered: Vec<_> = snapshot
             .sorted_nodes(NodeSort::Delay)
@@ -630,6 +984,7 @@ mod tests {
             .collect(),
             observations_note: None,
             checked_at: String::new(),
+            ..Default::default()
         };
         let ordered = |snapshot: &ApiSnapshot, direction| {
             snapshot

@@ -50,6 +50,7 @@ enum Page {
 }
 
 struct Deck {
+    instance: crate::single_instance::Instance,
     page: Page,
     node_sort: NodeSort,
     file_version: Option<String>,
@@ -87,6 +88,7 @@ impl Deck {
         settings_path: PathBuf,
         settings: Settings,
         error: Option<String>,
+        mut instance: crate::single_instance::Instance,
     ) -> Self {
         fn input(
             value: String,
@@ -100,12 +102,30 @@ impl Deck {
                     .default_value(value)
             })
         }
+        instance.attach(window).expect("无法登记 XrayDeck 单例窗口");
         let upgrading = Arc::new(AtomicBool::new(false));
         let close_requested = Arc::new(AtomicBool::new(false));
+        let tray = match crate::tray::Tray::new(window, close_requested.clone()) {
+            Ok(tray) => Some(std::rc::Rc::new(tray)),
+            Err(error) => {
+                xray_deck::logging::event(&format!("托盘初始化失败：{error:#}"));
+                None
+            }
+        };
+        if let Some(tray) = tray.clone() {
+            cx.on_app_quit(move |_, _| {
+                tray.remove_icon();
+                async {}
+            })
+            .detach();
+        }
         let guard = upgrading.clone();
         let requested = close_requested.clone();
         window.on_window_should_close(cx, move |_, cx| {
-            if guard.load(Ordering::SeqCst) {
+            if let Some(tray) = &tray {
+                tray.hide();
+                false
+            } else if guard.load(Ordering::SeqCst) {
                 requested.store(true, Ordering::SeqCst);
                 false
             } else {
@@ -115,6 +135,7 @@ impl Deck {
         });
         let settings_loaded = error.is_none();
         let mut deck = Self {
+            instance,
             page: Page::Home,
             node_sort: NodeSort::Delay,
             file_version: None,
@@ -176,6 +197,13 @@ impl Deck {
                 executor.timer(Duration::from_secs(1)).await;
                 if entity
                     .update(cx, |this, cx| {
+                        this.instance.poll_activation();
+                        if this.close_requested.load(Ordering::SeqCst)
+                            && !this.upgrading.load(Ordering::SeqCst)
+                        {
+                            cx.quit();
+                            return;
+                        }
                         let blocked = this.busy
                             || this.starting
                             || this.local_loading
@@ -732,7 +760,14 @@ fn card() -> Div {
         .border_color(rgb(0x29354a))
 }
 
-const NODE_COLUMN_WIDTHS: [Option<f32>; 5] = [None, Some(110.), Some(230.), Some(85.), Some(130.)];
+const NODE_COLUMN_WIDTHS: [Option<f32>; 6] = [
+    None,
+    Some(90.),
+    Some(190.),
+    Some(85.),
+    Some(130.),
+    Some(200.),
+];
 const NODE_SCROLL_GUTTER: f32 = 12.;
 const NODE_HEADER_TEXT: u32 = 0x94a3b8;
 const NODE_HEADER_BACKGROUND: u32 = 0x1e293b;
@@ -771,8 +806,26 @@ fn deck_input(state: &Entity<InputState>, disabled: bool) -> Input {
         .border_color(rgb(0x29354a))
 }
 
+fn format_bytes(bytes: Option<u64>) -> String {
+    let Some(bytes) = bytes else {
+        return "—".into();
+    };
+    let units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024. && unit < units.len() - 1 {
+        value /= 1024.;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", units[unit])
+    }
+}
+
 /// Both header and body use the same column widths, shrink rules and padding.
-fn node_columns(values: [String; 5], header_sort: Option<NodeSort>, cx: &mut Context<Deck>) -> Div {
+fn node_columns(values: [String; 6], header_sort: Option<NodeSort>, cx: &mut Context<Deck>) -> Div {
     let header = header_sort.is_some();
     let mut row = div()
         .w_full()
@@ -805,9 +858,9 @@ fn node_columns(values: [String; 5], header_sort: Option<NodeSort>, cx: &mut Con
                 .px_0()
                 .label(format!("{value}{arrow}"))
                 .tooltip(if index == 3 {
-                    "点击切换延迟升序 / 降序；无有效延迟的节点始终置后"
+                    "选中节点优先；组内切换延迟升序 / 降序，无有效延迟置后"
                 } else {
-                    "点击切换观测时间升序 / 降序；核心未提供时间的节点始终置后"
+                    "选中节点优先；组内切换时间升序 / 降序，无有效时间置后"
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.node_sort = if index == 3 {
@@ -826,7 +879,7 @@ fn node_columns(values: [String; 5], header_sort: Option<NodeSort>, cx: &mut Con
             Some(width) => cell.w(px(width)).flex_shrink_0(),
             None => cell.flex_1(),
         };
-        row = row.child(cell.when(header || matches!(index, 1 | 3 | 4), |cell| {
+        row = row.child(cell.when(header || matches!(index, 1 | 3 | 4 | 5), |cell| {
             cell.text_center()
         }));
     }
@@ -844,8 +897,9 @@ fn node_columns(values: [String; 5], header_sort: Option<NodeSort>, cx: &mut Con
 /// changed visible rows invalidate it; checked_at alone never repaints the list.
 #[derive(Default)]
 struct NodeList {
-    rows: Vec<[String; 5]>,
+    rows: Vec<[String; 6]>,
     note: Option<String>,
+    selected: std::collections::BTreeSet<String>,
 }
 
 impl NodeList {
@@ -898,12 +952,21 @@ impl NodeList {
                     },
                     delay,
                     time,
+                    {
+                        let traffic = snapshot.traffic.get(&node.tag);
+                        format!(
+                            "↑ {} / ↓ {}",
+                            format_bytes(traffic.and_then(|t| t.uplink)),
+                            format_bytes(traffic.and_then(|t| t.downlink))
+                        )
+                    },
                 ]
             })
             .collect::<Vec<_>>();
-        if self.rows != rows || self.note != note {
+        if self.rows != rows || self.note != note || self.selected != snapshot.selected_nodes {
             self.rows = rows;
             self.note = note;
+            self.selected = snapshot.selected_nodes.clone();
             return true;
         }
         false
@@ -937,15 +1000,26 @@ impl Render for NodeList {
                     .py_2()
                     .text_sm()
                     .rounded_md()
-                    .bg(rgb(0x101827))
+                    .bg(rgb(if self.selected.contains(&values[0]) {
+                        0x163347
+                    } else {
+                        0x101827
+                    }))
                     .children(NODE_COLUMN_WIDTHS.into_iter().zip(values).enumerate().map(
                         |(index, (width, value))| {
-                            let cell = div().min_w(px(0.)).truncate().child(value.clone());
+                            let cell = div().min_w(px(0.));
+                            let cell = if index == 0 && self.selected.contains(value) {
+                                cell.truncate()
+                                    .text_color(rgb(0x67e8f9))
+                                    .child(format!("● 已选中 · {value}"))
+                            } else {
+                                cell.truncate().child(value.clone())
+                            };
                             let cell = match width {
                                 Some(width) => cell.w(px(width)).flex_shrink_0(),
                                 None => cell.flex_1(),
                             };
-                            cell.when(matches!(index, 1 | 3 | 4), |cell| cell.text_center())
+                            cell.when(matches!(index, 1 | 3 | 4 | 5), |cell| cell.text_center())
                         },
                     ))
             }))
@@ -1006,10 +1080,17 @@ impl Render for Deck {
             })
             .unwrap_or_else(|| "尚未检查更新".into());
         let home = self.page == Page::Home;
-        let observation_note = self
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.observations_note.clone());
+        let observation_note = self.snapshot.as_ref().and_then(|snapshot| {
+            let notes: Vec<_> = [
+                &snapshot.observations_note,
+                &snapshot.traffic_note,
+                &snapshot.balancers_note,
+            ]
+            .into_iter()
+            .filter_map(|note| note.as_deref())
+            .collect();
+            (!notes.is_empty()).then(|| notes.join("；"))
+        });
         let update_summary = if self.update_status.is_empty() {
             update_text
                 .split(" · ")
@@ -1047,11 +1128,11 @@ impl Render for Deck {
                     .child(nodes_heading(nodes_summary, window))
                     .child(div().flex_shrink_0().child(refresh_button(self, busy, cx))))
                     .child(div().flex_shrink_0().pr(px(NODE_SCROLL_GUTTER)).child(node_columns(
-                        ["节点名称", "协议", "服务器", "观测延迟", "观测时间"].map(String::from), Some(self.node_sort), cx)))
+                        ["节点名称", "协议", "服务器", "观测延迟", "观测时间", "累计流量 ↑ / ↓"].map(String::from), Some(self.node_sort), cx)))
                     .child(div().flex_1().min_h(px(0.)).child(self.node_list.clone().cached(StyleRefinement::default().size_full())))
                     .when_some(observation_note, |view, note| view.child(div().flex_shrink_0()
                         .border_t_1().border_color(rgb(0x29354a)).pt_2()
-                        .child(label(format!("观测结果：{note}")))))))
+                        .child(label(note))))))
                 .when(!home, |view| view
                 .child(card().child(div().text_lg().child("连接配置与 API 诊断"))
                     .child(label(self.nodes_status.clone()))
@@ -1101,7 +1182,7 @@ impl Render for Deck {
     }
 }
 
-pub fn run() -> Result<()> {
+pub fn run(instance: crate::single_instance::Instance) -> Result<()> {
     let directory = data_dir()?;
     std::fs::create_dir_all(&directory)?;
     let path = directory.join("settings.json");
@@ -1136,7 +1217,7 @@ pub fn run() -> Result<()> {
             ..Default::default()
         };
         gpui_kit::open_window(options, cx, |window, cx| {
-            cx.new(|cx| Deck::new(window, cx, path, settings, error))
+            cx.new(|cx| Deck::new(window, cx, path, settings, error, instance))
         })
         .expect("无法打开 XrayDeck 窗口");
         cx.activate(true);
@@ -1163,6 +1244,7 @@ mod node_list_tests {
             observations: vec![],
             observations_note: None,
             checked_at: "before".into(),
+            ..Default::default()
         }
     }
 
@@ -1207,5 +1289,32 @@ mod node_list_tests {
         assert!(list.update_snapshot(&snapshot, NodeSort::Delay));
         assert!(list.rows.is_empty());
         assert_eq!(list.note.as_deref(), Some("核心未返回出站"));
+    }
+
+    #[test]
+    fn selection_and_traffic_refresh_invalidate_cached_rows() {
+        let mut snapshot = snapshot();
+        let mut list = NodeList::default();
+        list.update_snapshot(&snapshot, NodeSort::Delay);
+        assert_eq!(list.rows[0][5], "↑ — / ↓ —");
+        snapshot.traffic.insert(
+            "proxy".into(),
+            api::NodeTraffic {
+                uplink: Some(0),
+                downlink: Some(2048),
+            },
+        );
+        assert!(list.update_snapshot(&snapshot, NodeSort::Delay));
+        assert_eq!(list.rows[0][5], "↑ 0 B / ↓ 2.0 KiB");
+        snapshot.selected_nodes.insert("proxy".into());
+        assert!(list.update_snapshot(&snapshot, NodeSort::Delay));
+        assert!(list.selected.contains("proxy"));
+        assert!(!list.update_snapshot(&snapshot, NodeSort::Delay));
+        snapshot.selected_nodes.clear();
+        snapshot.traffic.clear();
+        assert!(list.update_snapshot(&snapshot, NodeSort::Delay));
+        assert!(list.selected.is_empty());
+        assert_eq!(list.rows[0][5], "↑ — / ↓ —");
+        assert_eq!(super::format_bytes(Some(u64::MAX)), "16.0 EiB");
     }
 }

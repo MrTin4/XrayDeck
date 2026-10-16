@@ -2,6 +2,7 @@
 /target/
 /debug/
 /dist/
+/dest/
 /.tools/
 **/*.rs.bk
 *.pdb

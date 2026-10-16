@@ -1,0 +1,29 @@
+name: Windows verification
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Unit tests
+        run: cargo test --locked --no-default-features
+      - name: Desktop checks
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Build portable release
+        shell: pwsh
+        run: ./scripts/package.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: XrayDeck-windows-x64
+          path: |
+            dist/XrayDeck-*-windows-x64.zip
+            dist/XrayDeck-*-windows-x64.zip.sha256
+          if-no-files-found: error

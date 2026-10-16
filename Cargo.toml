@@ -1,0 +1,51 @@
+[package]
+name = "xray-deck"
+version = "0.1.21"
+edition = "2024"
+license = "MIT"
+description = "Windows desktop panel for an existing WinSW-managed Xray service"
+repository = "https://github.com/MrTin4/XrayDeck"
+readme = "README.md"
+
+[features]
+default = ["desktop"]
+desktop = ["dep:gpui-kit"]
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+futures = "0.3"
+hex = "0.4"
+prost = "0.14"
+quick-xml = { version = "0.38", features = ["serialize"] }
+reqwest = { version = "0.12", features = ["blocking", "json", "native-tls"] }
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "sync"] }
+tonic = { version = "0.14", features = ["transport"] }
+tonic-prost = "0.14"
+url = "2"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+gpui-kit = { version = "=0.7.3", optional = true }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_Registry"] }
+
+[dev-dependencies]
+tempfile = "3"
+tonic-reflection = "0.14"
+tokio-stream = { version = "0.1", features = ["net"] }
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+strip = "symbols"
+lto = "thin"
+
+[[bin]]
+name = "xray-deck"
+path = "src/main.rs"

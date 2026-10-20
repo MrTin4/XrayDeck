@@ -4,3 +4,4 @@
 - 完成相应验证后递增应用版本，同步 `Cargo.toml`、`Cargo.lock`、`README.md` 与 `CHANGELOG.md`，并更新文档中的当前交付信息。
 - 使用 `scripts/build.ps1` 生成 Windows x64 Release 及 `dist/` 下对应版本的便携目录、ZIP 与 SHA-256 文件，保留旧版本产物。
 - 交付前核对归档内容及校验值，在回复中提供新版本包路径；若构建失败，修复后重试或明确说明阻碍。
+- 用户要求：后续每次修改完成后及时创建本地 Git commit；默认不 push，由用户统一推送到 GitHub。只有用户另行明确要求推送时才执行 push。

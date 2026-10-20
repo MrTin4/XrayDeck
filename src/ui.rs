@@ -707,7 +707,7 @@ fn app_heading(
     cx: &mut Context<Deck>,
 ) -> Div {
     let title: SharedString = "XrayDeck".into();
-    let version: SharedString = format!("运行版本 {runtime_version}").into();
+    let version: SharedString = format!("内核版本 {runtime_version}").into();
     let title_size = window.rem_size() * 1.5;
     let version_size = window.rem_size() * 0.875;
     let title_height = window.pixel_snap(window.rem_size() * 2.);
@@ -770,14 +770,16 @@ fn app_heading(
         .items_start()
         .gap_3()
         .child(title_and_version)
-        .child(
-            div()
-                .min_w(px(0.))
-                .pt(baseline - version_baseline)
-                .text_size(version_size)
-                .line_height(version_height)
-                .child(update_summary),
-        )
+        .when(!update_summary.is_empty(), |view| {
+            view.child(
+                div()
+                    .min_w(px(0.))
+                    .pt(baseline - version_baseline)
+                    .text_size(version_size)
+                    .line_height(version_height)
+                    .child(update_summary),
+            )
+        })
         .child(
             update_link("home-check", busy)
                 .mt(baseline - version_baseline)
@@ -1091,34 +1093,18 @@ impl Render for Deck {
                 services = services.child(label(name.clone()));
             }
         }
-        let update_text = self
-            .release
-            .as_ref()
-            .map(|r| {
-                format!(
-                    "{} · {} · {} · {}",
-                    match self
-                        .file_version
-                        .as_ref()
-                        .and_then(|version| parse_version(version).ok())
-                    {
-                        Some(current) => match parse_version(&r.tag_name) {
-                            Ok(latest) if latest > current => "有更新",
-                            Ok(_) => "核心已是最新或更新版本",
-                            Err(_) => "发布版本无法比较",
-                        },
-                        None => "版本未知，暂无法比较",
-                    },
-                    r.tag_name,
-                    if r.prerelease {
-                        "预发布"
-                    } else {
-                        "正式版"
-                    },
-                    r.published_at.as_deref().unwrap_or("发布时间未知")
-                )
-            })
-            .unwrap_or_else(|| "尚未检查更新".into());
+        let release_details = self.release.as_ref().map(|r| {
+            format!(
+                "{} · {} · {}",
+                r.tag_name,
+                if r.prerelease {
+                    "预发布"
+                } else {
+                    "正式版"
+                },
+                r.published_at.as_deref().unwrap_or("发布时间未知")
+            )
+        });
         let home = self.page == Page::Home;
         let observation_note = self.snapshot.as_ref().and_then(|snapshot| {
             let notes: Vec<_> = [
@@ -1132,11 +1118,24 @@ impl Render for Deck {
             (!notes.is_empty()).then(|| notes.join("；"))
         });
         let update_summary = if self.update_status.is_empty() {
-            update_text
-                .split(" · ")
-                .take(2)
-                .collect::<Vec<_>>()
-                .join(" · ")
+            self.release
+                .as_ref()
+                .map(|release| {
+                    match (
+                        self.file_version
+                            .as_deref()
+                            .and_then(|v| parse_version(v).ok()),
+                        parse_version(&release.tag_name),
+                    ) {
+                        (Some(current), Ok(latest)) if latest > current => {
+                            format!("可更新至 {}", release.tag_name)
+                        }
+                        (Some(current), Ok(latest)) if latest == current => "已是最新".into(),
+                        (Some(_), Ok(_)) => "已高于发布版".into(),
+                        _ => "版本无法比较".into(),
+                    }
+                })
+                .unwrap_or_default()
         } else {
             self.update_status.clone()
         };
@@ -1156,7 +1155,7 @@ impl Render for Deck {
             .child(div().id("page").size_full().p_4().flex().flex_col().gap_3()
                 .when(!home, |view| view.overflow_y_scroll())
                 .child(div().flex().justify_between().items_center().gap_3().flex_shrink_0()
-                    .child(app_heading(&runtime_version, update_summary, busy && !self.refreshing, window, cx))
+                    .child(app_heading(&runtime_version, update_summary.clone(), busy && !self.refreshing, window, cx))
                     .child(div().flex().gap_3().items_center().flex_shrink_0()
                         .child(label(concat!("v", env!("CARGO_PKG_VERSION"))))
                         .child(deck_button("navigation", cx).label(if home { "设置" } else { "返回主页" }).on_click(cx.listener(|this,_,_,cx| {
@@ -1201,7 +1200,7 @@ impl Render for Deck {
                         .child(deck_button("validate", cx).label("校验关联与版本").disabled(busy).on_click(cx.listener(|this,_,_,cx|this.validate(cx)))))
                     .child(label(self.local_note.clone()))
                     .when(!self.settings_status.is_empty(), |view| view.child(label(self.settings_status.clone())))
-                    .child(label(self.association.as_ref().map(|s|format!("服务 {} · PID {} · 运行版本：{} · {}",s.name,s.process_id,
+                    .child(label(self.association.as_ref().map(|s|format!("服务 {} · PID {} · 内核版本：{} · {}",s.name,s.process_id,
                         s.runtime_version.as_deref().unwrap_or("未知"),
                         [s.runtime_version_source.as_deref(), s.runtime_version_note.as_deref()].into_iter().flatten().collect::<Vec<_>>().join(" · ")))
                         .unwrap_or_else(||"校验服务、包装器、核心路径及 API 监听进程后才允许升级。".into()))))
@@ -1213,8 +1212,8 @@ impl Render for Deck {
                         .child(deck_button("save-update-check", cx).label("保存检测设置").disabled(busy).on_click(cx.listener(|this,_,_,cx| { this.save(cx); cx.notify(); }))))
                     .child(label("默认每 60 分钟检测一次，保存后生效；设置页及托盘后台继续检测，忙碌时延后。手动检测后重新计时，仅检查版本。"))
                     .when(!self.settings_status.is_empty(), |view| view.child(label(self.settings_status.clone())))
-                    .when(!self.update_status.is_empty(), |view| view.child(label(self.update_status.clone())))
-                    .when(self.release.is_some() || self.update_status.is_empty(), |view| view.child(label(update_text)))
+                    .when(!update_summary.is_empty(), |view| view.child(label(update_summary)))
+                    .when_some(release_details, |view, details| view.child(label(details)))
                     .child(div().flex().gap_3().items_center()
                         .child(deck_button("channel", cx).label(if self.settings.include_prerelease{"渠道：含预发布"}else{"渠道：仅正式版"}).disabled(busy).on_click(cx.listener(|this,_,_,cx|{this.settings.include_prerelease = !this.settings.include_prerelease;this.release=None;this.update_status.clear();this.save(cx);cx.notify()})))
                         .child(update_link("check", busy).label("检查官方更新").on_click(cx.listener(|this,_,_,cx|this.check(cx))))

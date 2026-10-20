@@ -4,6 +4,7 @@
 
 ```text
 .github/workflows/ci.yml  Windows 自动验证与便携包构建
+AGENTS.md               项目协作约定、版本递增及编译交付要求
 assets/                  应用图标原图、多尺寸 ICO 与 Windows 资源定义
 build.rs                 构建时将图标资源嵌入 EXE
 docs/                    使用、设计、开发及验证记录
@@ -74,6 +75,6 @@ cargo run --locked --no-default-features -- --check-updates
 
 ## 提交与交付
 
-修改业务逻辑时补充对应测试；修改后运行 `scripts/test.ps1`，交付前运行 `scripts/package.ps1` 并校验归档内容及 SHA-256。界面改动需人工验证。版本变化时同步 Cargo.toml、Cargo.lock、README 与 CHANGELOG。
+修改业务逻辑时补充对应测试；修改后运行 `scripts/test.ps1`，完成验证后及时递增版本并通过 `scripts/build.ps1` 编译生成新版本便携包，核对归档内容及 SHA-256，不只交付源码。保留旧版本产物。界面改动需人工验证。版本变化时同步 Cargo.toml、Cargo.lock、README、CHANGELOG 及需求文档中的当前交付信息。
 
 提交前检查 `git diff --check`、暂存清单与忽略规则，避免加入用户设置、凭据、核心配置、日志、下载缓存或构建产物。报告问题可使用 GitHub Issues，附应用版本、Windows 版本、复现步骤及脱敏诊断。

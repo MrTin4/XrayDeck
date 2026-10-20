@@ -1,6 +1,6 @@
 [package]
 name = "xray-deck"
-version = "0.1.27"
+version = "0.1.29"
 edition = "2024"
 license = "MIT"
 description = "Windows desktop panel for an existing WinSW-managed Xray service"
